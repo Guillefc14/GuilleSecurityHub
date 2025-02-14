@@ -2,12 +2,29 @@ import boto3
 import json
 import argparse
 
-# Nombre de la función Lambda
-LAMBDA_FUNCTION_NAME = "Cierra-Puertos"
-
 # Inicializar clientes
 lambda_client = boto3.client('lambda')
 sns_client = boto3.client('sns')
+
+def get_lambda_functions():
+    """Obtiene y muestra todas las funciones Lambda disponibles"""
+    try:
+        response = lambda_client.list_functions()
+        functions = response['Functions']
+        
+        print("\nFunciones Lambda disponibles:")
+        print("-" * 50)
+        for function in functions:
+            function_arn = function['FunctionArn']
+            function_name = function['FunctionName']
+            print(f"Nombre: {function_name}")
+            print(f"ARN: {function_arn}")
+            print("-" * 50)
+        
+        return functions
+    except Exception as e:
+        print(f"Error al obtener funciones Lambda: {str(e)}")
+        return None
 
 def get_sns_topics():
     """Obtiene y muestra todos los temas SNS disponibles"""
@@ -30,10 +47,10 @@ def get_sns_topics():
         print(f"Error al obtener temas SNS: {str(e)}")
         return None
 
-def get_current_excluded_ports():
+def get_current_excluded_ports(lambda_arn):
     """Obtiene los puertos excluidos actuales"""
     try:
-        response = lambda_client.get_function_configuration(FunctionName=LAMBDA_FUNCTION_NAME)
+        response = lambda_client.get_function_configuration(FunctionName=lambda_arn)
         env_vars = response.get('Environment', {}).get('Variables', {})
         excluded_ports = env_vars.get('EXCLUDED_PORTS', '{80, 443}')
         return eval(excluded_ports)
@@ -41,15 +58,15 @@ def get_current_excluded_ports():
         print(f"Error al obtener puertos excluidos: {str(e)}")
         return {80, 443}  # Valores por defecto
 
-def update_excluded_ports(new_port, description, sns_arn):
+def update_excluded_ports(lambda_arn, new_port, description, sns_arn):
     try:
         # Obtener puertos actuales
-        current_ports = get_current_excluded_ports()
+        current_ports = get_current_excluded_ports(lambda_arn)
         current_ports.add(new_port)
         
         # Actualizar la configuración de Lambda
         response = lambda_client.update_function_configuration(
-            FunctionName=LAMBDA_FUNCTION_NAME,
+            FunctionName=lambda_arn,
             Environment={
                 'Variables': {
                     'EXCLUDED_PORTS': str(current_ports)
@@ -60,6 +77,7 @@ def update_excluded_ports(new_port, description, sns_arn):
         # Enviar notificación SNS
         message = {
             "accion": "Puerto añadido a excepciones",
+            "funcion_lambda": lambda_arn,
             "puerto": new_port,
             "descripcion": description,
             "puertos_excluidos_actuales": list(current_ports)
@@ -80,15 +98,29 @@ def main():
     parser = argparse.ArgumentParser(description='Añadir puerto a excepciones')
     parser.add_argument('--port', type=int, help='Puerto a excluir')
     parser.add_argument('--description', type=str, help='Descripción de la excepción')
+    parser.add_argument('--lambda-arn', type=str, help='ARN de la función Lambda')
     parser.add_argument('--sns-arn', type=str, help='ARN del tema SNS')
     parser.add_argument('--force', action='store_true', help='No pedir confirmación')
     
     args = parser.parse_args()
+
+    # Mostrar funciones Lambda disponibles
+    lambda_functions = get_lambda_functions()
+    if not lambda_functions:
+        return
     
     # Mostrar temas SNS disponibles
     sns_topics = get_sns_topics()
     if not sns_topics:
         return
+
+    # Solicitar ARN de Lambda si no se proporcionó
+    lambda_arn = args.lambda_arn
+    while not lambda_arn:
+        lambda_arn = input("\nIntroduce el ARN de la función Lambda: ").strip()
+        if not lambda_arn.startswith('arn:aws:lambda:'):
+            print("Error: El ARN debe comenzar con 'arn:aws:lambda:'")
+            lambda_arn = None
 
     # Solicitar puerto si no se proporcionó
     port = args.port
@@ -118,7 +150,7 @@ def main():
             sns_arn = None
 
     # Mostrar puertos actuales
-    current_ports = get_current_excluded_ports()
+    current_ports = get_current_excluded_ports(lambda_arn)
     print(f"\nPuertos actualmente excluidos: {current_ports}")
 
     if port in current_ports:
@@ -126,6 +158,7 @@ def main():
         return
 
     print("\nResumen:")
+    print(f"Función Lambda: {lambda_arn}")
     print(f"Puerto a excluir: {port}")
     print(f"Descripción: {description}")
     print(f"ARN del SNS: {sns_arn}")
@@ -136,10 +169,10 @@ def main():
             print("\nOperación cancelada")
             return
     
-    if update_excluded_ports(port, description, sns_arn):
+    if update_excluded_ports(lambda_arn, port, description, sns_arn):
         print("\n✅ Puerto añadido exitosamente a las excepciones")
         print("✅ Notificación SNS enviada")
-        print(f"✅ Nuevos puertos excluidos: {get_current_excluded_ports()}")
+        print(f"✅ Nuevos puertos excluidos: {get_current_excluded_ports(lambda_arn)}")
     else:
         print("\n❌ Error al añadir el puerto")
 
