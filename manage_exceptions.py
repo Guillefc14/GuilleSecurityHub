@@ -1,6 +1,7 @@
 import boto3
 import json
 import argparse
+import base64
 
 # Inicializar clientes
 lambda_client = boto3.client('lambda')
@@ -37,7 +38,6 @@ def get_sns_topics():
         for topic in topics:
             topic_arn = topic['TopicArn']
             print(f"ARN: {topic_arn}")
-            # Obtener el nombre del tema desde el ARN
             topic_name = topic_arn.split(':')[-1]
             print(f"Nombre: {topic_name}")
             print("-" * 50)
@@ -47,32 +47,72 @@ def get_sns_topics():
         print(f"Error al obtener temas SNS: {str(e)}")
         return None
 
-def get_current_excluded_ports(lambda_arn):
-    """Obtiene los puertos excluidos actuales"""
+def get_lambda_code(lambda_arn):
+    """Obtiene el código actual de la función Lambda"""
     try:
-        response = lambda_client.get_function_configuration(FunctionName=lambda_arn)
-        env_vars = response.get('Environment', {}).get('Variables', {})
-        excluded_ports = env_vars.get('EXCLUDED_PORTS', '{80, 443}')
-        return eval(excluded_ports)
+        response = lambda_client.get_function(FunctionName=lambda_arn)
+        location = response['Code']['Location']
+        
+        # Obtener el código fuente
+        import urllib.request
+        with urllib.request.urlopen(location) as f:
+            code = f.read()
+        
+        return code
     except Exception as e:
-        print(f"Error al obtener puertos excluidos: {str(e)}")
-        return {80, 443}  # Valores por defecto
+        print(f"Error al obtener código Lambda: {str(e)}")
+        return None
 
 def update_excluded_ports(lambda_arn, new_port, description, sns_arn):
     try:
-        # Obtener puertos actuales
-        current_ports = get_current_excluded_ports(lambda_arn)
-        current_ports.add(new_port)
+        # Descargar el código actual
+        code = get_lambda_code(lambda_arn)
+        if not code:
+            return False
         
-        # Actualizar la configuración de Lambda
-        response = lambda_client.update_function_configuration(
-            FunctionName=lambda_arn,
-            Environment={
-                'Variables': {
-                    'EXCLUDED_PORTS': str(current_ports)
-                }
-            }
-        )
+        # Crear un archivo ZIP temporal con el código actualizado
+        import tempfile
+        import zipfile
+        import os
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "function.zip")
+            
+            # Extraer el código actual
+            with open(os.path.join(tmpdir, "lambda_function.zip"), "wb") as f:
+                f.write(code)
+            
+            # Extraer el archivo ZIP
+            with zipfile.ZipFile(os.path.join(tmpdir, "lambda_function.zip"), 'r') as zip_ref:
+                zip_ref.extractall(tmpdir)
+            
+            # Leer el código Python
+            with open(os.path.join(tmpdir, "lambda_function.py"), 'r') as f:
+                lambda_code = f.read()
+            
+            # Modificar la línea de EXCLUDED_PORTS
+            lines = lambda_code.split('\n')
+            for i, line in enumerate(lines):
+                if 'EXCLUDED_PORTS = {' in line:
+                    current_ports = eval(line.split('=')[1].strip())
+                    current_ports.add(new_port)
+                    lines[i] = f"EXCLUDED_PORTS = {current_ports}"
+                    break
+            
+            # Guardar el código modificado
+            with open(os.path.join(tmpdir, "lambda_function.py"), 'w') as f:
+                f.write('\n'.join(lines))
+            
+            # Crear nuevo ZIP
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                zipf.write(os.path.join(tmpdir, "lambda_function.py"), "lambda_function.py")
+            
+            # Actualizar la función Lambda
+            with open(zip_path, 'rb') as f:
+                lambda_client.update_function_code(
+                    FunctionName=lambda_arn,
+                    ZipFile=f.read()
+                )
         
         # Enviar notificación SNS
         message = {
@@ -149,14 +189,6 @@ def main():
             print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
             sns_arn = None
 
-    # Mostrar puertos actuales
-    current_ports = get_current_excluded_ports(lambda_arn)
-    print(f"\nPuertos actualmente excluidos: {current_ports}")
-
-    if port in current_ports:
-        print(f"\nEl puerto {port} ya está en la lista de excepciones")
-        return
-
     print("\nResumen:")
     print(f"Función Lambda: {lambda_arn}")
     print(f"Puerto a excluir: {port}")
@@ -172,7 +204,6 @@ def main():
     if update_excluded_ports(lambda_arn, port, description, sns_arn):
         print("\n✅ Puerto añadido exitosamente a las excepciones")
         print("✅ Notificación SNS enviada")
-        print(f"✅ Nuevos puertos excluidos: {get_current_excluded_ports(lambda_arn)}")
     else:
         print("\n❌ Error al añadir el puerto")
 
