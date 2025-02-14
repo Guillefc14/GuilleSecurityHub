@@ -1,11 +1,6 @@
 import boto3
 import json
 import argparse
-import zipfile
-import tempfile
-import os
-import urllib.request
-import io
 
 # Nombre de la función Lambda
 LAMBDA_FUNCTION_NAME = "Cierra-Puertos"
@@ -35,59 +30,32 @@ def get_sns_topics():
         print(f"Error al obtener temas SNS: {str(e)}")
         return None
 
-def get_lambda_code():
-    """Obtiene el código actual de la función Lambda"""
+def get_current_excluded_ports():
+    """Obtiene los puertos excluidos actuales"""
     try:
-        response = lambda_client.get_function(FunctionName=LAMBDA_FUNCTION_NAME)
-        code_location = response['Code']['Location']
-        
-        # Descargar el zip
-        code_zip = urllib.request.urlopen(code_location).read()
-        
-        # Extraer el contenido
-        with zipfile.ZipFile(io.BytesIO(code_zip)) as z:
-            lambda_code = z.read('lambda_function.py').decode('utf-8')
-            
-        return lambda_code
+        response = lambda_client.get_function_configuration(FunctionName=LAMBDA_FUNCTION_NAME)
+        env_vars = response.get('Environment', {}).get('Variables', {})
+        excluded_ports = env_vars.get('EXCLUDED_PORTS', '{80, 443}')
+        return eval(excluded_ports)
     except Exception as e:
-        print(f"Error al obtener el código Lambda: {str(e)}")
-        return None
+        print(f"Error al obtener puertos excluidos: {str(e)}")
+        return {80, 443}  # Valores por defecto
 
 def update_excluded_ports(new_port, description, sns_arn):
     try:
-        # Obtener el código actual
-        current_code = get_lambda_code()
-        if not current_code:
-            return False
-            
-        # Encontrar la línea que define EXCLUDED_PORTS
-        lines = current_code.split('\n')
-        for i, line in enumerate(lines):
-            if 'EXCLUDED_PORTS = {' in line:
-                # Extraer los puertos actuales
-                ports_str = line.split('{')[1].split('}')[0]
-                current_ports = {int(p.strip()) for p in ports_str.split(',') if p.strip()}
-                # Añadir el nuevo puerto
-                current_ports.add(new_port)
-                # Actualizar la línea
-                lines[i] = f"EXCLUDED_PORTS = {{{', '.join(map(str, current_ports))}}}"
-                break
+        # Obtener puertos actuales
+        current_ports = get_current_excluded_ports()
+        current_ports.add(new_port)
         
-        # Reconstruir el código
-        updated_code = '\n'.join(lines)
-        
-        # Crear archivo zip temporal
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, 'lambda_function.zip')
-            with zipfile.ZipFile(zip_path, 'w') as z:
-                z.writestr('lambda_function.py', updated_code)
-            
-            # Actualizar el código de la función
-            with open(zip_path, 'rb') as f:
-                lambda_client.update_function_code(
-                    FunctionName=LAMBDA_FUNCTION_NAME,
-                    ZipFile=f.read()
-                )
+        # Actualizar la configuración de Lambda
+        response = lambda_client.update_function_configuration(
+            FunctionName=LAMBDA_FUNCTION_NAME,
+            Environment={
+                'Variables': {
+                    'EXCLUDED_PORTS': str(current_ports)
+                }
+            }
+        )
         
         # Enviar notificación SNS
         message = {
@@ -149,6 +117,14 @@ def main():
             print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
             sns_arn = None
 
+    # Mostrar puertos actuales
+    current_ports = get_current_excluded_ports()
+    print(f"\nPuertos actualmente excluidos: {current_ports}")
+
+    if port in current_ports:
+        print(f"\nEl puerto {port} ya está en la lista de excepciones")
+        return
+
     print("\nResumen:")
     print(f"Puerto a excluir: {port}")
     print(f"Descripción: {description}")
@@ -163,6 +139,7 @@ def main():
     if update_excluded_ports(port, description, sns_arn):
         print("\n✅ Puerto añadido exitosamente a las excepciones")
         print("✅ Notificación SNS enviada")
+        print(f"✅ Nuevos puertos excluidos: {get_current_excluded_ports()}")
     else:
         print("\n❌ Error al añadir el puerto")
 
