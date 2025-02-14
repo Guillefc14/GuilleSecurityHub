@@ -1,6 +1,11 @@
 import boto3
 import json
 import argparse
+import zipfile
+import tempfile
+import os
+import urllib.request
+import io
 
 # Nombre de la función Lambda
 LAMBDA_FUNCTION_NAME = "Cierra-Puertos"
@@ -35,10 +40,6 @@ def get_lambda_code():
     try:
         response = lambda_client.get_function(FunctionName=LAMBDA_FUNCTION_NAME)
         code_location = response['Code']['Location']
-        # Descargar el código
-        import urllib.request
-        import zipfile
-        import io
         
         # Descargar el zip
         code_zip = urllib.request.urlopen(code_location).read()
@@ -76,8 +77,6 @@ def update_excluded_ports(new_port, description, sns_arn):
         updated_code = '\n'.join(lines)
         
         # Crear archivo zip temporal
-        import tempfile
-        import os
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = os.path.join(tmpdir, 'lambda_function.zip')
             with zipfile.ZipFile(zip_path, 'w') as z:
