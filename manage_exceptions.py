@@ -1,3 +1,5 @@
+# [Mantener todas las importaciones y funciones existentes]
+
 def get_current_excluded_ports(lambda_arn):
     """Obtiene los puertos actualmente excluidos"""
     try:
@@ -5,7 +7,6 @@ def get_current_excluded_ports(lambda_arn):
         if not code:
             return None
 
-        # Crear un archivo temporal y extraer el código
         import tempfile
         import zipfile
         import os
@@ -111,38 +112,42 @@ def main():
     if not lambda_functions:
         return
 
-    # Solicitar ARN de Lambda
+    # Mostrar temas SNS disponibles
+    sns_topics = get_sns_topics()
+    if not sns_topics:
+        return
+
+    # Solicitar ARN de Lambda si no se proporcionó
     lambda_arn = input("\nIntroduce el ARN de la función Lambda: ").strip()
     if not lambda_arn.startswith('arn:aws:lambda:'):
         print("Error: El ARN debe comenzar con 'arn:aws:lambda:'")
         return
 
-    while True:
-        print("\n=== Menú de Gestión de Puertos Excluidos ===")
-        print("1. Listar puertos excluidos")
-        print("2. Añadir puerto")
-        print("3. Eliminar puerto")
-        print("4. Salir")
+    # Solicitar ARN del SNS
+    sns_arn = input("\nIntroduce el ARN del tema SNS: ").strip()
+    if not sns_arn.startswith('arn:aws:sns:'):
+        print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
+        return
 
-        option = input("\nSelecciona una opción (1-4): ")
+    while True:
+        # Mostrar puertos excluidos actuales
+        current_ports = get_current_excluded_ports(lambda_arn)
+        print("\nPuertos actualmente excluidos:")
+        print("-" * 50)
+        for port in sorted(current_ports):
+            print(f"Puerto: {port}")
+        print("-" * 50)
+
+        # Mostrar menú de opciones
+        print("\n=== Menú de Opciones ===")
+        print("1. Añadir puerto a excepciones")
+        print("2. Eliminar puerto de excepciones")
+        print("3. Salir")
+        
+        option = input("\nSelecciona una opción (1-3): ").strip()
 
         if option == "1":
-            # Listar puertos
-            current_ports = get_current_excluded_ports(lambda_arn)
-            if current_ports:
-                print("\nPuertos actualmente excluidos:")
-                print("-" * 50)
-                for port in sorted(current_ports):
-                    print(f"Puerto: {port}")
-                print("-" * 50)
-
-        elif option == "2":
-            # Añadir puerto (código existente)
-            # Mostrar temas SNS disponibles
-            sns_topics = get_sns_topics()
-            if not sns_topics:
-                continue
-
+            # Añadir puerto
             port = 0
             while not (1 <= port <= 65535):
                 try:
@@ -160,33 +165,17 @@ def main():
                 if not description:
                     print("Error: La descripción no puede estar vacía")
 
-            sns_arn = input("\nIntroduce el ARN del tema SNS: ").strip()
-            if not sns_arn.startswith('arn:aws:sns:'):
-                print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
-                continue
-
             if update_excluded_ports(lambda_arn, port, description, sns_arn):
                 print("\n✅ Puerto añadido exitosamente a las excepciones")
                 print("✅ Notificación SNS enviada")
             else:
                 print("\n❌ Error al añadir el puerto")
 
-        elif option == "3":
+        elif option == "2":
             # Eliminar puerto
-            sns_topics = get_sns_topics()
-            if not sns_topics:
-                continue
-
-            current_ports = get_current_excluded_ports(lambda_arn)
             if not current_ports:
-                print("No hay puertos excluidos para eliminar")
+                print("\nNo hay puertos excluidos para eliminar")
                 continue
-
-            print("\nPuertos disponibles para eliminar:")
-            print("-" * 50)
-            for port in sorted(current_ports):
-                print(f"Puerto: {port}")
-            print("-" * 50)
 
             port = 0
             while not (1 <= port <= 65535):
@@ -199,23 +188,18 @@ def main():
                     print("Error: Introduce un número válido")
                     port = 0
 
-            sns_arn = input("\nIntroduce el ARN del tema SNS: ").strip()
-            if not sns_arn.startswith('arn:aws:sns:'):
-                print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
-                continue
-
             if remove_excluded_port(lambda_arn, port, sns_arn):
                 print("\n✅ Puerto eliminado exitosamente de las excepciones")
                 print("✅ Notificación SNS enviada")
             else:
                 print("\n❌ Error al eliminar el puerto")
 
-        elif option == "4":
+        elif option == "3":
             print("\n¡Hasta luego!")
             break
 
         else:
-            print("\nOpción no válida. Por favor, selecciona una opción válida (1-4)")
+            print("\nOpción no válida. Por favor, selecciona una opción válida (1-3)")
 
 if __name__ == "__main__":
     main()
