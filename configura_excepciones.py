@@ -1,5 +1,9 @@
 import boto3
 import json
+import tempfile
+import zipfile
+import os
+import urllib.request
 
 # Inicializar clientes
 lambda_client = boto3.client('lambda')
@@ -45,29 +49,73 @@ def get_sns_topics():
         print(f"Error al obtener temas SNS: {str(e)}")
         return None
 
-def get_excluded_ports(lambda_arn):
-    """Obtiene los puertos excluidos actuales"""
+def get_lambda_code_and_ports(lambda_arn):
+    """Obtiene el código actual y los puertos excluidos"""
     try:
-        response = lambda_client.get_function_configuration(FunctionName=lambda_arn)
-        env_vars = response.get('Environment', {}).get('Variables', {})
-        excluded_ports = env_vars.get('EXCLUDED_PORTS', '{80, 443}')
-        return eval(excluded_ports)
+        response = lambda_client.get_function(FunctionName=lambda_arn)
+        location = response['Code']['Location']
+        
+        # Descargar el código
+        with urllib.request.urlopen(location) as f:
+            code = f.read()
+            
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "lambda_function.zip")
+            
+            # Guardar el ZIP
+            with open(zip_path, "wb") as f:
+                f.write(code)
+            
+            # Extraer el ZIP
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(tmpdir)
+            
+            # Leer el código Python
+            with open(os.path.join(tmpdir, "lambda_function.py"), 'r') as f:
+                lambda_code = f.read()
+            
+            # Obtener puertos excluidos
+            for line in lambda_code.split('\n'):
+                if 'EXCLUDED_PORTS = {' in line:
+                    ports = eval(line.split('=')[1].strip())
+                    return lambda_code, ports
+                    
+        return None, set()
     except Exception as e:
-        print(f"Error al obtener puertos excluidos: {str(e)}")
-        return set([80, 443])
+        print(f"Error al obtener código Lambda: {str(e)}")
+        return None, set()
 
-def update_excluded_ports(lambda_arn, ports, description, sns_arn):
-    """Actualiza los puertos excluidos"""
+def update_lambda_code(lambda_arn, ports, description, sns_arn):
+    """Actualiza el código de la función Lambda"""
     try:
-        # Actualizar la configuración de Lambda
-        response = lambda_client.update_function_configuration(
-            FunctionName=lambda_arn,
-            Environment={
-                'Variables': {
-                    'EXCLUDED_PORTS': str(ports)
-                }
-            }
-        )
+        # Obtener el código actual
+        current_code, _ = get_lambda_code_and_ports(lambda_arn)
+        if not current_code:
+            return False
+            
+        # Modificar la línea de EXCLUDED_PORTS
+        new_lines = []
+        for line in current_code.split('\n'):
+            if 'EXCLUDED_PORTS = {' in line:
+                new_lines.append(f"EXCLUDED_PORTS = {ports}")
+            else:
+                new_lines.append(line)
+        
+        new_code = '\n'.join(new_lines)
+        
+        # Crear nuevo ZIP
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "function.zip")
+            
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                zipf.writestr('lambda_function.py', new_code)
+            
+            # Actualizar la función Lambda
+            with open(zip_path, 'rb') as f:
+                lambda_client.update_function_code(
+                    FunctionName=lambda_arn,
+                    ZipFile=f.read()
+                )
         
         # Enviar notificación SNS
         message = {
@@ -85,7 +133,7 @@ def update_excluded_ports(lambda_arn, ports, description, sns_arn):
         
         return True
     except Exception as e:
-        print(f"Error al actualizar puertos excluidos: {str(e)}")
+        print(f"Error al actualizar código Lambda: {str(e)}")
         return False
 
 def main():
@@ -96,114 +144,91 @@ def main():
     if not lambda_functions:
         return
 
+    # Mostrar temas SNS disponibles
+    sns_topics = get_sns_topics()
+    if not sns_topics:
+        return
+
     # Solicitar ARN de Lambda
-    lambda_arn = ""
-    while not lambda_arn:
-        lambda_arn = input("\nIntroduce el ARN de la función Lambda: ").strip()
-        if not lambda_arn.startswith('arn:aws:lambda:'):
-            print("Error: El ARN debe comenzar con 'arn:aws:lambda:'")
-            lambda_arn = ""
+    lambda_arn = input("\nIntroduce el ARN de la función Lambda: ").strip()
+    if not lambda_arn.startswith('arn:aws:lambda:'):
+        print("Error: El ARN debe comenzar con 'arn:aws:lambda:'")
+        return
+
+    # Solicitar ARN del SNS
+    sns_arn = input("\nIntroduce el ARN del tema SNS: ").strip()
+    if not sns_arn.startswith('arn:aws:sns:'):
+        print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
+        return
 
     while True:
-        # Mostrar menú principal
-        print("\n=== Menú Principal ===")
-        print("1. Listar puertos excluidos")
-        print("2. Añadir puerto")
-        print("3. Eliminar puerto")
-        print("4. Salir")
+        # Obtener código y puertos actuales
+        _, current_ports = get_lambda_code_and_ports(lambda_arn)
         
-        option = input("\nSelecciona una opción (1-4): ").strip()
+        print("\nPuertos actualmente excluidos:")
+        print("-" * 50)
+        for port in sorted(current_ports):
+            print(f"Puerto: {port}")
+        print("-" * 50)
+
+        print("\n=== Menú de Opciones ===")
+        print("1. Añadir puerto")
+        print("2. Eliminar puerto")
+        print("3. Salir")
         
+        option = input("\nSelecciona una opción (1-3): ").strip()
+
         if option == "1":
-            # Listar puertos
-            current_ports = get_excluded_ports(lambda_arn)
-            print("\nPuertos actualmente excluidos:")
-            print("-" * 50)
-            for port in sorted(current_ports):
-                print(f"Puerto: {port}")
-            print("-" * 50)
-            
-        elif option == "2" or option == "3":
-            # Mostrar temas SNS disponibles
-            sns_topics = get_sns_topics()
-            if not sns_topics:
-                continue
-            
-            # Solicitar ARN del SNS
-            sns_arn = ""
-            while not sns_arn:
-                sns_arn = input("\nIntroduce el ARN del tema SNS: ").strip()
-                if not sns_arn.startswith('arn:aws:sns:'):
-                    print("Error: El ARN debe comenzar con 'arn:aws:sns:'")
-                    sns_arn = ""
-            
-            # Obtener puertos actuales
-            current_ports = get_excluded_ports(lambda_arn)
-            
-            # Solicitar puerto
-            port = 0
-            while not (1 <= port <= 65535):
-                try:
-                    port = int(input("\nIntroduce el número de puerto: "))
-                    if not (1 <= port <= 65535):
-                        print("Error: El puerto debe estar entre 1 y 65535")
-                        port = 0
-                except ValueError:
-                    print("Error: Introduce un número válido")
-                    port = 0
-            
-            if option == "2":  # Añadir
-                if port in current_ports:
-                    print(f"\nEl puerto {port} ya está en la lista de excepciones")
+            try:
+                port = int(input("\nIntroduce el número de puerto a añadir: "))
+                if not (1 <= port <= 65535):
+                    print("Error: El puerto debe estar entre 1 y 65535")
                     continue
                 
-                description = ""
-                while not description:
-                    description = input("\nIntroduce una descripción para esta excepción: ").strip()
-                    if not description:
-                        print("Error: La descripción no puede estar vacía")
+                if port in current_ports:
+                    print(f"El puerto {port} ya está en la lista de excepciones")
+                    continue
                 
+                description = input("\nIntroduce una descripción para esta excepción: ").strip()
+                if not description:
+                    print("Error: La descripción no puede estar vacía")
+                    continue
+
                 current_ports.add(port)
-                action_desc = "Añadir"
-            else:  # Eliminar
+                if update_lambda_code(lambda_arn, current_ports, description, sns_arn):
+                    print("\n✅ Puerto añadido exitosamente")
+                else:
+                    print("\n❌ Error al añadir el puerto")
+            
+            except ValueError:
+                print("Error: Introduce un número válido")
+
+        elif option == "2":
+            if not current_ports:
+                print("\nNo hay puertos excluidos para eliminar")
+                continue
+            
+            try:
+                port = int(input("\nIntroduce el número de puerto a eliminar: "))
                 if port not in current_ports:
-                    print(f"\nEl puerto {port} no está en la lista de excepciones")
+                    print(f"El puerto {port} no está en la lista de excepciones")
                     continue
                 
                 current_ports.remove(port)
-                description = f"Eliminado puerto {port}"
-                action_desc = "Eliminar"
+                if update_lambda_code(lambda_arn, current_ports, f"Eliminado puerto {port}", sns_arn):
+                    print("\n✅ Puerto eliminado exitosamente")
+                else:
+                    print("\n❌ Error al eliminar el puerto")
             
-            print("\nResumen:")
-            print(f"Acción: {action_desc} excepción")
-            print(f"Función Lambda: {lambda_arn}")
-            print(f"Puerto: {port}")
-            if option == "2":
-                print(f"Descripción: {description}")
-            print(f"ARN del SNS: {sns_arn}")
-            
-            confirm = input("\n¿Confirmar la acción? (s/n): ").lower()
-            if confirm != 's':
-                print("\nOperación cancelada")
-                continue
-            
-            if update_excluded_ports(lambda_arn, current_ports, description, sns_arn):
-                print("\n✅ Puertos excluidos actualizados exitosamente")
-                print("✅ Notificación SNS enviada")
-                print("\nNueva lista de puertos excluidos:")
-                print("-" * 50)
-                for port in sorted(current_ports):
-                    print(f"Puerto: {port}")
-                print("-" * 50)
-            else:
-                print("\n❌ Error al actualizar los puertos excluidos")
-            
-        elif option == "4":
+            except ValueError:
+                print("Error: Introduce un número válido")
+
+        elif option == "3":
             print("\n¡Hasta luego!")
             break
-            
+
         else:
-            print("\nOpción no válida. Por favor, selecciona una opción válida (1-4)")
+            print("\nOpción no válida. Por favor, selecciona una opción válida (1-3)")
 
 if __name__ == "__main__":
     main()
