@@ -121,7 +121,7 @@ def update_lambda_code(lambda_arn, ports, description, sns_arn):
         message = {
             "accion": "Puertos excluidos actualizados",
             "funcion_lambda": lambda_arn,
-            "puertos_excluidos": list(ports),
+            "puertos_excluidos": "El listado final de puertos exluidos es:"list(ports),
             "descripcion": description
         }
         
