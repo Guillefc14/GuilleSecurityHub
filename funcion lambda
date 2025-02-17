@@ -1,0 +1,154 @@
+import boto3
+import json
+import logging
+
+# Configuración del logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Inicialización de clientes AWS
+ec2 = boto3.client("ec2")
+sns_client = boto3.client("sns")
+
+# Configuraciones
+SNS_TOPIC_ARN = "arn:aws:sns:eu-west-3:061039770309:Puerto-Ok"
+EXCLUDED_PORTS = {80, 443}
+
+def send_sns_notification(subject, message):
+    """
+    Envía una notificación SNS con el asunto y mensaje proporcionados.
+    """
+    try:
+        logger.info(f"Intentando enviar notificación SNS: {subject}")
+        response = sns_client.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=subject,
+            Message=message
+        )
+        logger.info(f"Notificación SNS enviada exitosamente: {response}")
+        return response
+    except Exception as e:
+        logger.error(f"Error enviando notificación SNS: {str(e)}")
+        return None
+
+def lambda_handler(event, context):
+    """
+    Función principal que maneja el evento Lambda.
+    """
+    logger.info("Iniciando función lambda")
+    logger.info(f"Evento recibido: {json.dumps(event, indent=2)}")
+
+    # Validación inicial del evento
+    if not event:
+        logger.error("No se recibió evento")
+        return {"statusCode": 400, "body": "No event received"}
+
+    if "detail" not in event:
+        logger.error("El evento no contiene 'detail'")
+        return {"statusCode": 400, "body": "Invalid event structure"}
+
+    findings = event.get("detail", {}).get("findings", [])
+    logger.info(f"Findings encontrados: {len(findings)}")
+
+    success = False
+    errors = []
+
+    for finding in findings:
+        logger.info("Procesando finding:")
+        logger.info(json.dumps(finding, indent=2))
+
+        for resource in finding.get("Resources", []):
+            logger.info(f"Tipo de recurso: {resource.get('Type')}")
+
+            if resource.get("Type") == "AwsEc2SecurityGroup":
+                security_group_id = resource.get("Id").split("/")[-1]
+                logger.info(f"Procesando Security Group: {security_group_id}")
+
+                # Obtener el puerto expuesto desde el hallazgo
+                exposed_port = None
+                for entry in finding.get("NetworkPath", []):
+                    if entry.get("ComponentType") == "Port":
+                        exposed_port = entry.get("ComponentValue")
+                        break
+
+                if exposed_port is None:
+                    msg = f"No se ha encontrado ningun puerto expuesto en el security group:{security_group_id}"
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue
+
+                # Convertir a entero si es posible
+                try:
+                    exposed_port = int(exposed_port)
+                    logger.info(f"Puerto expuesto encontrado: {exposed_port}")
+                except ValueError:
+                    msg = f"Error, el formato del puerto es incorrecto: {exposed_port}"
+                    logger.error(msg)
+                    errors.append(msg)
+                    continue
+
+                # Verificar si el puerto está en la lista de excepciones
+                if exposed_port in EXCLUDED_PORTS:
+                    msg = f"El puerto {exposed_port} encontrado en el grupo de seguridad {security_group_id} está en la lista de excepciones. No se aplicará ninguna medida."
+                    logger.info(msg)
+                    send_sns_notification(
+                        "Puerto excluido encontrado - Todo correcto",
+                        msg
+                    )
+                    continue
+
+                try:
+                    # Obtener las reglas actuales del Security Group
+                    logger.info(f"Obteniendo reglas para security group: {security_group_id}")
+                    response = ec2.describe_security_groups(GroupIds=[security_group_id])
+                    logger.info(f"Security Group response: {json.dumps(response, indent=2)}")
+
+                    security_group = response["SecurityGroups"][0]
+                    ingress_rules = security_group.get("IpPermissions", [])
+                    logger.info(f"Reglas de ingreso encontradas: {json.dumps(ingress_rules, indent=2)}")
+
+                    # Buscar la regla exacta del puerto expuesto
+                    rules_to_revoke = []
+                    for rule in ingress_rules:
+                        if rule.get("FromPort") == exposed_port and rule.get("ToPort") == exposed_port:
+                            for ip_range in rule.get("IpRanges", []):
+                                if ip_range.get("CidrIp") == "0.0.0.0/0":
+                                    rules_to_revoke.append({
+                                        "IpProtocol": rule["IpProtocol"],
+                                        "FromPort": exposed_port,
+                                        "ToPort": exposed_port,
+                                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}]
+                                    })
+
+                    # Revocar solo la regla del puerto específico
+                    if rules_to_revoke:
+                        logger.info(f"Revocando reglas: {json.dumps(rules_to_revoke, indent=2)}")
+                        ec2.revoke_security_group_ingress(
+                            GroupId=security_group_id,
+                            IpPermissions=rules_to_revoke
+                        )
+                        msg = f"El puerto {exposed_port} se ha cerrado correctamente en el grupo de seguridad {security_group_id}."
+                        logger.info(msg)
+                        send_sns_notification("La función lambda se ha ejecutado con éxito", msg)
+                        success = True
+                    else:
+                        logger.info(f"No se encontraron reglas para revocar en el puerto {exposed_port}")
+
+                except Exception as e:
+                    msg = f"Error con el grupo de seguridad:{security_group_id}: {str(e)}"
+                    logger.error(msg)
+                    errors.append(msg)
+
+    # Enviar notificación de error si hubo fallos
+    if errors:
+        error_message = f"La función lambda Cierra-Puertos ha encontrado errores: {'; '.join(errors)}"
+        logger.error(error_message)
+        send_sns_notification("La función lambda Cierra-Puertos ha fallado", error_message)
+
+    response_body = "Corrección realizada" if success else "El código ha fallado"
+    logger.info(f"Finalizando función lambda. Resultado: {response_body}")
+    
+    return {
+        "statusCode": 200,
+        "body": json.dumps(response_body)
+    }
